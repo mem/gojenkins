@@ -23,6 +23,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Job struct {
@@ -69,18 +70,18 @@ type JobResponse struct {
 		IconUrl       string `json:"iconUrl"`
 		Score         int64  `json:"score"`
 	} `json:"healthReport"`
-	InQueue               bool     `json:"inQueue"`
-	KeepDependencies      bool     `json:"keepDependencies"`
-	LastBuild             JobBuild `json:"lastBuild"`
-	LastCompletedBuild    JobBuild `json:"lastCompletedBuild"`
-	LastFailedBuild       JobBuild `json:"lastFailedBuild"`
-	LastStableBuild       JobBuild `json:"lastStableBuild"`
-	LastSuccessfulBuild   JobBuild `json:"lastSuccessfulBuild"`
-	LastUnstableBuild     JobBuild `json:"lastUnstableBuild"`
-	LastUnsuccessfulBuild JobBuild `json:"lastUnsuccessfulBuild"`
-	Name                  string   `json:"name"`
-	SubJobs               []InnerJob    `json:"jobs"`
-	NextBuildNumber       int64    `json:"nextBuildNumber"`
+	InQueue               bool       `json:"inQueue"`
+	KeepDependencies      bool       `json:"keepDependencies"`
+	LastBuild             JobBuild   `json:"lastBuild"`
+	LastCompletedBuild    JobBuild   `json:"lastCompletedBuild"`
+	LastFailedBuild       JobBuild   `json:"lastFailedBuild"`
+	LastStableBuild       JobBuild   `json:"lastStableBuild"`
+	LastSuccessfulBuild   JobBuild   `json:"lastSuccessfulBuild"`
+	LastUnstableBuild     JobBuild   `json:"lastUnstableBuild"`
+	LastUnsuccessfulBuild JobBuild   `json:"lastUnsuccessfulBuild"`
+	Name                  string     `json:"name"`
+	SubJobs               []InnerJob `json:"jobs"`
+	NextBuildNumber       int64      `json:"nextBuildNumber"`
 	Property              []struct {
 		ParameterDefinitions []ParameterDefinition `json:"parameterDefinitions"`
 	} `json:"property"`
@@ -415,7 +416,7 @@ func (j *Job) HasQueuedBuild() {
 }
 
 func (j *Job) InvokeSimple(params map[string]string, queueJob bool) (int64, error) {
-	if (!queueJob) {
+	if !queueJob {
 		isQueued, err := j.IsQueued()
 		if err != nil {
 			return 0, err
@@ -455,6 +456,43 @@ func (j *Job) InvokeSimple(params map[string]string, queueJob bool) (int64, erro
 	u, err := url.Parse(location)
 	if err != nil {
 		return 0, err
+	}
+
+	if strings.HasPrefix(u.Path, "/queue/item/") {
+		// The job was queued. The resulting Location looks like
+		// {base_url}/queue/item/id. When GETting api/json from
+		// that, the resulting document has the job number
+		// available as .executable.number (int).
+		var result struct {
+			Class      string `json:"_class"`
+			Executable struct {
+				Number int64
+			}
+		}
+
+	GET_BUILD_ID:
+		for {
+			resp, err = j.Jenkins.Requester.GetJSON(u.Path, &result, nil)
+			if err != nil {
+				return 0, err
+			}
+
+			if resp.StatusCode != 200 && resp.StatusCode != 201 {
+				return 0, errors.New("Could not get ID for job " + j.GetName())
+			}
+
+			switch result.Class {
+			case `hudson.model.Queue$WaitingItem`:
+				time.Sleep(1 * time.Second)
+				continue
+			case `hudson.model.Queue$LeftItem`:
+				break GET_BUILD_ID
+			default:
+				return 0, errors.New("Could not get ID for job " + j.GetName())
+			}
+		}
+
+		return result.Executable.Number, nil
 	}
 
 	number, err := strconv.ParseInt(path.Base(u.Path), 10, 64)
